@@ -7,6 +7,7 @@ on:
 
 env:
   REPO_URL: https://github.com/LiBwrt/openwrt-6.x.git
+  REPO_NAME: LiBwrt/openwrt-6.x
   REPO_BRANCH: 25.12-nss
   CONFIG_FILE: configs/ipq60xx-6.12-wifi.config
   DIY_SCRIPT: libwrt.sh
@@ -22,7 +23,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Check upstream repo for updates
+      id: check
+      run: |
+          
+          API_URL="https://api.github.com/repos/$REPO_NAME/commits/$REPO_BRANCH"
+          LATEST_DATE=$(curl -sL -H "Accept: application/vnd.github.v3+json" -H "Authorization: Bearer ${{ github.token }}" "$API_URL" | jq -r '.commit.committer.date')
+          
+          if [ "$LATEST_DATE" == "null" ] || [ -z "$LATEST_DATE" ]; then
+            echo "query upstream repo error"
+            exit 1
+          fi
+
+          LATEST_TIMESTAMP=$(date -d "$LATEST_DATE" +%s)
+          CURRENT_TIMESTAMP=$(date +%s)
+          DIFF_SECONDS=$((CURRENT_TIMESTAMP - LATEST_TIMESTAMP))
+          
+          echo "Upstream lastest commit: $LATEST_DATE"
+
+          if [ $DIFF_SECONDS -le 86400 ]; then
+            echo "Upsteam has commit in 24 hours, continue ..."
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream no commit in 24 hours, skip ..."
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
     - name: Check Server Performance(检查服务器性能)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         echo "警告⚠"
         echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
@@ -37,6 +65,7 @@ jobs:
         echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
 
     - name: Initialization Environment(初始化环境)
+      if: steps.check.outputs.has_update == 'true'
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
@@ -50,6 +79,7 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
 
     - name: Combine Disks(合并磁盘)
+      if: steps.check.outputs.has_update == 'true'
       uses: easimon/maximize-build-space@master
       with:
         swap-size-mb: 1024
@@ -57,9 +87,11 @@ jobs:
         root-reserve-mb: 1024
 
     - name: Checkout
+      if: steps.check.outputs.has_update == 'true'
       uses: actions/checkout@main
 
     - name: Clone Source Code(克隆源代码)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         df -hT $GITHUB_WORKSPACE
         git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
@@ -69,6 +101,7 @@ jobs:
         echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
 
     - name: Generate Variables(生成变量)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         cp $CONFIG_FILE $OPENWRT_PATH/.config
         cd $OPENWRT_PATH
@@ -81,7 +114,9 @@ jobs:
         echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
 
     - name: Cache Toolchain(缓存工具链)
-      if: env.CACHE_TOOLCHAIN == 'true'
+      if: |
+        steps.check.outputs.has_update == 'true' &&
+        env.CACHE_TOOLCHAIN == 'true'
       uses: HiGarfield/cachewrtbuild@main
       with:
         ccache: false
@@ -89,6 +124,7 @@ jobs:
         prefix: ${{ env.OPENWRT_PATH }}
     
     - name: Install Feeds(安装feeds)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         cd $OPENWRT_PATH
         ./scripts/feeds update -a
@@ -99,6 +135,7 @@ jobs:
         ./scripts/feeds install -a
   
     - name: Load Custom Configuration(加载自定义配置)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         [ -e files ] && mv files $OPENWRT_PATH/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
@@ -107,6 +144,7 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_SCRIPT
 
     - name: Download DL Package(下载DL软件包)
+      if: steps.check.outputs.has_update == 'true'
       run: |
         cd $OPENWRT_PATH
         make defconfig
@@ -115,6 +153,7 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Compile Firmware(开始编译固件)
+      if: steps.check.outputs.has_update == 'true'
       id: compile
       run: |
         cd $OPENWRT_PATH
@@ -125,18 +164,23 @@ jobs:
         echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
 
     - name: Check Space Usage(检查空间使用情况)
-      if: (!cancelled())
+      if: steps.check.outputs.has_update == 'true' && (!cancelled())
       run: df -hT
 
     - name: Upload Bin Directory(上传固件)
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      if: |
+        steps.check.outputs.has_update == 'true' &&
+        steps.compile.outputs.status == 'success' &&
+        env.UPLOAD_BIN_DIR == 'true'
       uses: actions/upload-artifact@main
       with:
         name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
         path: ${{ env.OPENWRT_PATH }}/bin
 
     - name: Organize Files(整理文件)
-      if: steps.compile.outputs.status == 'success'
+      if: |
+        steps.check.outputs.has_update == 'true' &&
+        steps.compile.outputs.status == 'success'
       run: |
         cd $OPENWRT_PATH/bin/targets/*/*
         cat sha256sums
@@ -148,14 +192,20 @@ jobs:
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
 
     - name: Upload Firmware To Artifact(将固件上传到Artifact)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
+      if: |
+        steps.check.outputs.has_update == 'true' &&
+        steps.compile.outputs.status == 'success' &&
+        env.FIRMWARE_RELEASE != 'true'
       uses: actions/upload-artifact@main
       with:
         name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE_PATH }}
 
     - name: Upload Firmware To Release(发布固件)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+      if: |
+        steps.check.outputs.has_update == 'true' &&
+        steps.compile.outputs.status == 'success' &&
+        env.FIRMWARE_RELEASE == 'true'
       uses: ncipollo/release-action@v1
       with:
         name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
