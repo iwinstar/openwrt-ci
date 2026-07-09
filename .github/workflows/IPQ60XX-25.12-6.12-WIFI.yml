@@ -39,6 +39,7 @@ jobs:
           CURRENT_TIMESTAMP=$(date +%s)
           DIFF_SECONDS=$((CURRENT_TIMESTAMP - LATEST_TIMESTAMP))
           
+          echo "Upstream API Url: $API_URL"
           echo "Upstream lastest commit: $LATEST_DATE"
 
           if [ $DIFF_SECONDS -le 86400 ]; then
